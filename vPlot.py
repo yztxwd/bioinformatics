@@ -73,7 +73,7 @@ def main():
         raise Exception("Expected 3 parameters!")
     else:
         bed, threads, output = sys.argv[1:]
-        threas = int(threads)
+        threads = int(threads)
 
     # load intersect bed file
     chunks = pd.read_table(bed, header=None, comment="#", names=["a_chr", "a_start", "a_end", "b_chr", "b_start", "b_end", "b_name", "b_length"],
