@@ -85,7 +85,7 @@ def main():
     p = Pool(threads)
     counter = Counter()
     for chunk in chunks:
-        ps.append(p.apply_rsync(dump_matrix, args = ((chunk, Counter), )))
+        ps.append(p.apply_async(dump_matrix, args = ((chunk, Counter), )))
     p.close()
     p.join()
 
