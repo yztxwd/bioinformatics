@@ -4,7 +4,7 @@ import os, sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from multiprocessing import Pool
+from multiprocessing import Pool, Value
 
 description = """
 
