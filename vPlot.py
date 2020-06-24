@@ -51,18 +51,15 @@ def dump_matrix(input):
     chunk, counter = input
 
     # initialize v-plot matrix
-    rl = chunk.loc[1, "r_end"] - chunk.loc[1, "r_start"]
+    rl = chunk.loc[1, "a_end"] - chunk.loc[1, "a_start"]
     vMatrix = np.zeros([1000, rl])
 
     # for each record, add the fragment size info into the v-plot matrix
-    count = 0
     for index in chunk.index:
         a_start, a_end, b_start, b_end, length = chunk.loc[index, ["a_start", "a_end", "b_start", "b_end", "b_length"]]
         o_start, o_end = find_overlap(a_start, a_end, b_start, b_end)
         vMatrix[length-1, o_start: o_end] += 1
-        count += 1
-        if count % 100000 == 0:
-            counter.increment()
+    counter.increment()
     
     return vMatrix
 
