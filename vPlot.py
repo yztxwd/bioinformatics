@@ -56,7 +56,7 @@ def dump_matrix(input):
 
     # for each record, add the fragment size info into the v-plot matrix
     count = 0
-    for index in df.index:
+    for index in chunk.index:
         a_start, a_end, b_start, b_end, length = chunk.loc[index, ["a_start", "a_end", "b_start", "b_end", "b_length"]]
         o_start, o_end = find_overlap(a_start, a_end, b_start, b_end)
         vMatrix[length-1, o_start: o_end] += 1
@@ -77,7 +77,7 @@ def main():
 
     # load intersect bed file
     chunks = pd.read_table(bed, header=None, comment="#", names=["a_chr", "a_start", "a_end", "b_chr", "b_start", "b_end", "b_name", "b_length"],
-                        chunks = 10**6)
+                        chunksize = 10**6)
 
     # multiprocess
     ## start 
