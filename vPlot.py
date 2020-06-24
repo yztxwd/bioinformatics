@@ -27,6 +27,10 @@ class Counter(object):
             self.val.value += 1
         print("%s0000 lines have been handled..." % self.val.value)
 
+def init(c):
+    global counter
+    counter = c
+
 def find_overlap(a_start, a_end, b_start, b_end):
     """
         find the relative coordinate of the overlapped region
@@ -82,10 +86,9 @@ def main():
     # multiprocess
     ## start 
     ps = []
-    p = Pool(threads)
-    counter = Counter()
+    p = Pool(threads, initializer = init, initargs = (Counter(),))
     for chunk in chunks:
-        ps.append(p.apply_async(dump_matrix, args = ((chunk, counter), )))
+        ps.append(p.apply_async(dump_matrix, args = (chunk, )))
     p.close()
     p.join()
 
