@@ -4,13 +4,14 @@ import os, sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from multiprocessing import Pool
 
 description = """
 
     Plot v-plot which describes the fragment size && coverage information in distinct region
 
     Example uage:
-        $ python vPlot.py intersect.bed output
+        $ python vPlot.py intersect.bed threads output
 
     Requirements:
         input intersect.bed should be output of bedtools intersect with -wa -wb option, which will describe the input region info and overlapped fragment info
@@ -37,27 +38,52 @@ def find_overlap(a_start, a_end, b_start, b_end):
     
     return o_start, o_end
 
-def main():
-    # load parameters
-    if len(sys.argv) != 3:
-        print(description)
-        raise Exception("Expected 2 parameters!")
-    else:
-        bed, output = sys.argv[1:]
-
-    # load intersect bed file
-    df = pd.read_table(bed, header=None, comment="#")
-    df.columns = ["a_chr", "a_start", "a_end", "b_chr", "b_start", "b_end", "b_name", "b_length"]
-
+def dump_matrix(chunk):
     # initialize v-plot matrix
-    rl = df.loc[1, "r_end"] - df.loc[1, "r_start"]
-    vMatrix = np.array(1000, rl)
+    rl = chunk.loc[1, "r_end"] - chunk.loc[1, "r_start"]
+    vMatrix = np.zeros([1000, rl])
 
     # for each record, add the fragment size info into the v-plot matrix
     for index in df.index:
-        a_start, a_end, b_start, b_end, length = df.loc[index, ["a_start", "a_end", "b_start", "b_end", "b_length"]]
+        a_start, a_end, b_start, b_end, length = chunk.loc[index, ["a_start", "a_end", "b_start", "b_end", "b_length"]]
         o_start, o_end = find_overlap(a_start, a_end, b_start, b_end)
         vMatrix[length-1, o_start: o_end] += 1
+    
+    return vMatrix
+
+def main():
+    # load parameters
+    if len(sys.argv) != 4:
+        print(description)
+        raise Exception("Expected 3 parameters!")
+    else:
+        bed, threads, output = sys.argv[1:]
+        threas = int(threads)
+
+    # load intersect bed file
+    chunks = pd.read_table(bed, header=None, comment="#", names=["a_chr", "a_start", "a_end", "b_chr", "b_start", "b_end", "b_name", "b_length"],
+                        chunks = 10**6)
+
+    # multiprocess
+    ## start 
+    ps = []
+    p = Pool(threads)
+    for chunk in chunks:
+        ps.append(p.apply_rsync(dump_matrix, args = (chunk, )))
+    p.close()
+    p.join()
+
+    ## get results
+    results = []
+    for process in ps:
+        results.append(process.get())
+
+    # add up all results
+    for index in range(len(results)):
+        if index == 0:
+            vMatrix = results[index]
+        else:
+            vMatrix += results[index]
     
     # save the v-plot matrix
     np.savetxt("%s.txt" % output, vMatrix)
