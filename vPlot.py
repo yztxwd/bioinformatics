@@ -25,7 +25,7 @@ class Counter(object):
     def increment(self):
         with self.val.get_lock():
             self.val.value += 1
-        print("%s00000 lines have been handled..." % self.val.value)
+        print("%s0000 lines have been handled..." % self.val.value)
 
 def find_overlap(a_start, a_end, b_start, b_end):
     """
@@ -55,11 +55,14 @@ def dump_matrix(input):
     vMatrix = np.zeros([1000, rl])
 
     # for each record, add the fragment size info into the v-plot matrix
+    count = 0
     for index in chunk.index:
         a_start, a_end, b_start, b_end, length = chunk.loc[index, ["a_start", "a_end", "b_start", "b_end", "b_length"]]
         o_start, o_end = find_overlap(a_start, a_end, b_start, b_end)
         vMatrix[length-1, o_start: o_end] += 1
-    counter.increment()
+        count += 1
+        if count % 10000 == 0:
+            counter.increment()
     
     return vMatrix
 
