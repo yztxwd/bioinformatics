@@ -55,7 +55,7 @@ def dump_matrix(input):
     chunk, counter = input
 
     # initialize v-plot matrix
-    rl = chunk.loc[1, "a_end"] - chunk.loc[1, "a_start"]
+    rl = chunk.loc[chunk.index[0], "a_end"] - chunk.loc[chunk.index[0], "a_start"]
     vMatrix = np.zeros([1000, rl])
 
     # for each record, add the fragment size info into the v-plot matrix
