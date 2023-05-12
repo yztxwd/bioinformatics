@@ -17,6 +17,13 @@ from yaml import safe_load
 from Bio import SeqIO
 from pyfasta import Fasta
 from deeplift.dinuc_shuffle import dinuc_shuffle
+from typing import Tuple, Any
+from torch import Tensor
+from captum._utils.common import (
+    _expand_additional_forward_args,
+    _expand_target,
+    ExpansionTypes)
+from captum._utils.typing import TargetType
 
 from captum.attr import (
     GradientShap,
@@ -64,6 +71,70 @@ class SeqChromDatasetForBaselines(IterableDataset):
             ms = np.vstack([np.zeros(length, dtype=np.float32)]*self.num_chroms)
             
             yield seq, ms
+
+# overwrite the expand and compute_mean function of DeepLiftShap to enable example specific background sets
+class DeepLiftShapPatched(DeepLiftShap):
+
+    def _expand_inputs_baselines_targets(
+        self,
+        baselines: Tuple[Tensor, ...],
+        inputs: Tuple[Tensor, ...],
+        target: TargetType,
+        additional_forward_args: Any,
+        num_baselines_per_sample: int=10,
+    ) -> Tuple[Tuple[Tensor, ...], Tuple[Tensor, ...], TargetType, Any]:
+
+        inp_bsz = inputs[0].shape[0]
+        #base_bsz = baselines[0].shape[0]
+        base_bsz = num_baselines_per_sample
+
+        expanded_inputs = tuple(
+            [
+                input.repeat_interleave(base_bsz, dim=0).requires_grad_()
+                for input in inputs
+            ]
+        )
+        # no need to repeat baselines here, we already did it in the baseline function
+        #expanded_baselines = tuple(
+        #    [
+        #        baseline.repeat(
+        #            (inp_bsz,) + tuple([1] * (len(baseline.shape) - 1))
+        #        ).requires_grad_()
+        #        for baseline in baselines
+        #    ]
+        #)
+        expanded_baselines = baselines
+        #print(len(expanded_inputs))
+        #print(expanded_inputs[0].shape)
+        #print(expanded_baselines[0].shape)
+        #print(expanded_baselines[1].shape)
+        expanded_target = _expand_target(
+            target, base_bsz, expansion_type=ExpansionTypes.repeat_interleave
+        )
+        input_additional_args = (
+            _expand_additional_forward_args(
+                additional_forward_args,
+                base_bsz,
+                expansion_type=ExpansionTypes.repeat_interleave,
+            )
+            if additional_forward_args is not None
+            else None
+        )
+        return (
+            expanded_inputs,
+            expanded_baselines,
+            expanded_target,
+            input_additional_args,
+        )
+
+    def _compute_mean_across_baselines(
+        self, inp_bsz: int, base_bsz: int, attribution: Tensor, num_baselines_per_sample: int=10
+    ) -> Tensor:
+        # Average for multiple references
+        attr_shape: Tuple = (inp_bsz, num_baselines_per_sample)
+        if len(attribution.shape) > 1:
+            attr_shape += attribution.shape[1:]
+        return torch.mean(attribution.view(attr_shape), dim=1, keepdim=False)
             
 # write the attributions into bigwig files
 def write_bw(filename, arrs, regions):
@@ -110,18 +181,22 @@ def write_bw(filename, arrs, regions):
 
 def dinuc_shuffle_several_times_seqchrom(seqchrom: Tuple[torch.tensor, torch.tensor], times: int=10, seed: int=1) -> Tuple[torch.tensor, torch.tensor]:
     seq, chrom = seqchrom
-    seq_to_return = dinuc_shuffle_several_times_seq(seq)
-    chrom_to_return = torch.zeros_like(chrom)    
+    seq_to_return = dinuc_shuffle_several_times_seq(seq, times, seed)
+    chrom_to_return = torch.stack([torch.zeros_like(i) for j in range(times) for i in chrom])
     return (seq_to_return, chrom_to_return)
 
 def dinuc_shuffle_several_times_seq(seq: torch.tensor, times: int=10, seed: int=1) -> torch.tensor:
-    assert len(seq.shape) == 3  # dim: 1 x D x L
-    onehot_seq = seq[0].T # dim: L X D
+    assert len(seq.shape) == 3  # dim: N x D x L
+    onehot_seq = torch.permute(seq, (0, 2, 1)) # dim: N x L x D
     assert onehot_seq.shape[-1] == 4
-    rng = np.random.RandomState(seed)
     device = onehot_seq.device
-    to_return = torch.tensor(np.array([dinuc_shuffle(onehot_seq.detach().cpu().numpy(), rng=rng).T for i in range(times)])).to(device)
-    return to_return
+    to_returns = []
+    for s in onehot_seq:
+        # reset RandomState every loop to make it the same as v2 behavior on each example
+        rng = np.random.RandomState(seed)
+        to_return = torch.tensor(np.array([dinuc_shuffle(s.detach().cpu().numpy(), rng=rng).T for i in range(times)])).to(device)
+        to_returns.append(to_return)
+    return torch.cat(to_returns)
 
 def hypothetical_attribution_func(multipliers, inputs, baselines):
     """
@@ -129,10 +204,12 @@ def hypothetical_attribution_func(multipliers, inputs, baselines):
     as inputs for TF-Modisco
     """
 
+    assert isinstance(inputs, Tuple)
+
     if len(multipliers) == 1:
-        mult_seq = multipliers
-        input_seq = inputs
-        bg_seq = baselines
+        mult_seq = multipliers[0]
+        input_seq = inputs[0]
+        bg_seq = baselines[0]
     elif len(multipliers) == 2:
         mult_seq, mult_chrom = multipliers
         input_seq, input_chrom = inputs
@@ -147,10 +224,10 @@ def hypothetical_attribution_func(multipliers, inputs, baselines):
         hypothetical_input[:, i, :] = 1.0
         hypothetical_diff_from_bg = hypothetical_input - bg_seq
         hypothetical_contribs = hypothetical_diff_from_bg * mult_seq
-        projected_hypothetical_contribs_seq[:, i, :] = torch.sum(hypothetical_contribs.sum(dim=-2))
+        projected_hypothetical_contribs_seq[:, i, :] = hypothetical_contribs.sum(dim=-2)
     
     if len(multipliers) == 1:
-        return projected_hypothetical_contribs_seq
+        return (projected_hypothetical_contribs_seq, )
     else:
         return projected_hypothetical_contribs_seq, (input_chrom-bg_chrom)*mult_chrom
 
@@ -158,7 +235,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('model_id', help="Model directory name in logger_50epochs_balanced_valtest")
     parser.add_argument('data_config', help="Dataset config yaml file")
-    parser.add_argument('cuda_id', help="GPU id", type=int)
     parser.add_argument('input_bed', help="Bed file containing regions to be explained")
     parser.add_argument('out_dir', help="Output directory storing attributions")
     parser.add_argument('--seqonly', action="store_true", default=False, help="If model is seqonly model")
@@ -166,9 +242,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     # get cuda device
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.cuda_id-1)
-    device=f'cuda:{args.cuda_id-1}'
-    main_logger.info(f'Currently on cuda device: {args.cuda_id-1}')
+    device=f'cuda:0'
+    main_logger.info(f'Using device {device}')
     # get data config
     config = safe_load(open(args.data_config))
     chrom_name_list = [os.path.basename(i).split('.')[0].replace('-group1', '') for i in config['params']['chromatin_tracks']]
@@ -180,16 +255,17 @@ if __name__ == '__main__':
     logging.info(f'config file is {config_file}\ncheckpoint file is {checkpoint_file}')
     model = ConvRepeatVGGLike.load_from_checkpoint(checkpoint_file)
     model.eval()
-    dl = DeepLiftShap(model.to(device))
+    dl = DeepLiftShapPatched(model.to(device))
 
     # compute attribution scores
     data_ds = SeqChromDataset(args.input_bed, config=safe_load(open(args.data_config)),include_idx=True)
-    data_dl = DataLoader(data_ds, batch_size=1, num_workers=4, worker_init_fn=worker_init_fn)
+    data_dl = DataLoader(data_ds, batch_size=128, num_workers=16, worker_init_fn=worker_init_fn)
     main_logger.info("Computing feature attributions...")
     seqs = []; chroms = []; attributions = []; regions = []
     for region, seq, chrom in data_dl:
-        seqs.append(deepcopy(seq))
-        chroms.append(deepcopy(chrom))
+        if args.hypothetical:
+            seqs.append(deepcopy(seq))
+            chroms.append(deepcopy(chrom))
         if args.seqonly:
             attribution = dl.attribute(seq.to(device), baselines=dinuc_shuffle_several_times_seq, additional_forward_args=[0], custom_attribution_func=hypothetical_attribution_func if args.hypothetical else None)
         else:
@@ -205,30 +281,29 @@ if __name__ == '__main__':
     main_logger.info("Done!")
 
     # write output
-    # create output directory if not exists
-    if not os.path.isdir(args.out_dir):
-        os.mkdir(args.out_dir)
+    # create output directory
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    # save one-hot coded input and contributions
-    main_logger.info("Saving input tensors and corresponding contributions...")
-    seqs = torch.cat(seqs)
     attr_seqs = torch.cat(attributions) if args.seqonly else torch.cat([i[0] for i in attributions])
-    np.savez(f'{args.out_dir}/{args.model_id}_seq_one_hot.npz', seqs.numpy())
-    np.savez(f'{args.out_dir}/{args.model_id}_seq_contribs.npz', attr_seqs.numpy())
-    if not args.seqonly:
-        chroms = torch.cat(chroms)
-        attr_chroms = torch.cat([i[1] for i in attributions])
-        np.savez(f'{args.out_dir}/{args.model_id}_chrom.npz', chroms.numpy())
-        np.savez(f'{args.out_dir}/{args.model_id}_chrom_contribs.npz', attr_chroms.numpy())
-            
-    # concatenate attribution tensors, then write to bigwig file
-    if not args.hypothetical:
+    attr_chroms = torch.cat([i[1] for i in attributions])
+    if args.hypothetical:
+        # save one-hot coded input and contributions
+        main_logger.info("Saving input tensors and corresponding contributions...")
+        seqs = torch.cat(seqs)
+        np.savez(f'{args.out_dir}/{args.model_id}_seq_one_hot.npz', seqs.numpy())
+        np.savez(f'{args.out_dir}/{args.model_id}_seq_contribs.npz', attr_seqs.numpy())
+        if not args.seqonly:
+            chroms = torch.cat(chroms)
+            np.savez(f'{args.out_dir}/{args.model_id}_chrom.npz', chroms.numpy())
+            np.savez(f'{args.out_dir}/{args.model_id}_chrom_contribs.npz', attr_chroms.numpy())
+    else:
+        # concatenate attribution tensors, then write to bigwig file
         main_logger.info("Writing attributions into bigwig file...")
-        write_bw(f'f{args.out_dir}/{args.model_id}_seq_deepliftSHAP.bw', attr_seqs.sum(dim=1).numpy(), regions)
-        main_logger.info(f"Sequence attributions saved intof{args.out_dir}/{args.model_id}_seq_deepliftSHAP.bw")
+        write_bw(f'{args.out_dir}/{args.model_id}_seq_deepliftSHAP.bw', attr_seqs.sum(dim=1).numpy(), regions)
+        main_logger.info(f"Sequence attributions saved intof{args.out_dir}/bigwigs/{args.model_id}_seq_deepliftSHAP.bw")
         if not args.seqonly:
             for idx, c in enumerate(chrom_name_list):
-                write_bw(f'f{args.out_dir}/{args.model_id}_{c}_deepliftSHAP.bw', attr_chroms[:,idx,:].numpy(), regions)
-                main_logger.info(f"Chromatin feature {c} attributions saved into f{args.out_dir}/{args.model_id}_{c}_deepliftSHAP.bw")
+                write_bw(f'{args.out_dir}/{args.model_id}_{c}_deepliftSHAP.bw', attr_chroms[:,idx,:].numpy(), regions)
+                main_logger.info(f"Chromatin feature {c} attributions saved into f{args.out_dir}/bigwigs/{args.model_id}_{c}_deepliftSHAP.bw")
         main_logger.info("All done")
     
