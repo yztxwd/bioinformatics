@@ -26,7 +26,7 @@ if __name__ == "__main__":
                 parts = line.strip().split()
                 if len(parts) >= 3:
                     # Swap the motif name and ID
-                    parts[1], parts[2] = parts[2], parts[1]
+                    parts[1], parts[2] = parts[2].replace("/", "--"), parts[1].replace("/", "--")
                     out_f.write(" ".join(parts) + "\n")
                 else:
                     out_f.write(line)
